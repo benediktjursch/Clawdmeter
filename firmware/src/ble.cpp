@@ -63,13 +63,17 @@ static NimBLECharacteristic* req_char = nullptr;
 
 static ble_state_t state = BLE_STATE_INIT;
 static bool need_advertise = false;
+static uint32_t next_advertise_retry_ms = 0;
 static char rx_buf[BLE_BUF_SIZE];
 static volatile bool data_ready = false;
 static volatile bool has_received_data = false;
 static char mac_str[18];
 
-static void start_advertising() {
+static bool start_advertising() {
     NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
+    if (adv->isAdvertising()) {
+        return true;
+    }
     adv->reset();
     // Primary advertising packet (≤31 bytes):
     //   flags (3) + appearance (4) + HID service 0x1812 (4) + name "Clawdmeter" (12)
@@ -97,6 +101,8 @@ static void start_advertising() {
     Serial.printf("BLE: advertising start=%s (connected=%u)\n",
         ok ? "OK" : "FAILED",
         server ? (unsigned)server->getConnectedCount() : 0);
+
+    return ok;
 }
 
 class ServerCallbacks : public NimBLEServerCallbacks {
@@ -110,6 +116,7 @@ class ServerCallbacks : public NimBLEServerCallbacks {
         // discover and connect. NimBLE auto-stops advertising on each accept.
         if (s->getConnectedCount() < CONFIG_BT_NIMBLE_MAX_CONNECTIONS) {
             need_advertise = true;
+            next_advertise_retry_ms = millis() + 500;
         }
     }
 
@@ -117,6 +124,8 @@ class ServerCallbacks : public NimBLEServerCallbacks {
         // Only flip the UI state to DISCONNECTED when the last client leaves.
         if (s->getConnectedCount() == 0) state = BLE_STATE_DISCONNECTED;
         need_advertise = true;
+        next_advertise_retry_ms = millis() + 500;
+
         Serial.printf("BLE: disconnected (reason=%d, remaining=%u)\n",
             reason, (unsigned)s->getConnectedCount());
     }
@@ -209,10 +218,35 @@ void ble_init(void) {
 }
 
 void ble_tick(void) {
-    if (need_advertise) {
-        need_advertise = false;
-        start_advertising();
+    if (!server) {
+        return;
     }
+
+    NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
+
+    // Sind alle möglichen Verbindungen belegt, können wir nicht weiter werben.
+    if (server->getConnectedCount() >= CONFIG_BT_NIMBLE_MAX_CONNECTIONS) {
+        need_advertise = false;
+        return;
+    }
+
+    // Advertising läuft bereits.
+    if (adv->isAdvertising()) {
+        need_advertise = false;
+        return;
+    }
+
+    const uint32_t now = millis();
+
+    if ((int32_t)(now - next_advertise_retry_ms) < 0) {
+        return;
+    }
+
+    // Solange noch ein Verbindungsslot frei ist, alle 1 s erneut versuchen.
+    const bool ok = start_advertising();
+
+    need_advertise = !ok;
+    next_advertise_retry_ms = now + 1000;
 }
 
 ble_state_t ble_get_state(void) {
