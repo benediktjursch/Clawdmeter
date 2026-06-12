@@ -4,13 +4,24 @@
 
 #include <Arduino.h>
 #include "driver/spi_master.h"
+#include "esp_heap_caps.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 #define LCD_HOST SPI2_HOST
+#define LCD_COL_OFFSET 20
+#define TX_BUFFER_LINES 40
 
 static esp_lcd_panel_io_handle_t panel_io = nullptr;
 static esp_lcd_panel_handle_t panel = nullptr;
+
+static SemaphoreHandle_t transfer_done = nullptr;
+static uint16_t* tx_buffer = nullptr;
+
+static constexpr size_t TX_BUFFER_PIXELS =
+    static_cast<size_t>(LCD_WIDTH) * TX_BUFFER_LINES;
 
 static const uint8_t cmd_c4[] = {0x80};
 static const uint8_t cmd_35[] = {0x00};
@@ -30,15 +41,99 @@ static const sh8601_lcd_init_cmd_t lcd_init_cmds[] = {
     {0x51, cmd_51_on, 1, 0},
 };
 
-void display_hal_init(void) {
-    spi_bus_config_t bus_config = SH8601_PANEL_BUS_QSPI_CONFIG(
-        LCD_SCLK,
-        LCD_SDIO0,
-        LCD_SDIO1,
-        LCD_SDIO2,
-        LCD_SDIO3,
-        LCD_WIDTH * LCD_HEIGHT * 2
+static inline uint16_t swap_rgb565_bytes(uint16_t color) {
+    return static_cast<uint16_t>((color >> 8) | (color << 8));
+}
+
+static bool IRAM_ATTR color_transfer_done_callback(
+    esp_lcd_panel_io_handle_t panel_io_handle,
+    esp_lcd_panel_io_event_data_t* event_data,
+    void* user_context
+) {
+    (void)panel_io_handle;
+    (void)event_data;
+    (void)user_context;
+
+    BaseType_t task_woken = pdFALSE;
+
+    if (transfer_done) {
+        xSemaphoreGiveFromISR(transfer_done, &task_woken);
+    }
+
+    return task_woken == pdTRUE;
+}
+
+static bool send_buffer_blocking(
+    int32_t x,
+    int32_t y,
+    int32_t w,
+    int32_t h,
+    const uint16_t* buffer
+) {
+    if (!panel || !buffer || !transfer_done) {
+        return false;
+    }
+
+    // Eventuell übrig gebliebenes Signal entfernen.
+    xSemaphoreTake(transfer_done, 0);
+
+    esp_err_t err = esp_lcd_panel_draw_bitmap(
+        panel,
+        x + LCD_COL_OFFSET,
+        y,
+        x + LCD_COL_OFFSET + w,
+        y + h,
+        buffer
     );
+
+    if (err != ESP_OK) {
+        Serial.printf(
+            "Display transfer failed: %s\n",
+            esp_err_to_name(err)
+        );
+        return false;
+    }
+
+    if (xSemaphoreTake(
+            transfer_done,
+            pdMS_TO_TICKS(1000)
+        ) != pdTRUE) {
+        Serial.println("Display transfer timeout");
+        return false;
+    }
+
+    return true;
+}
+
+void display_hal_init(void) {
+    transfer_done = xSemaphoreCreateBinary();
+
+    if (!transfer_done) {
+        Serial.println("Display semaphore allocation failed");
+        return;
+    }
+
+    tx_buffer = static_cast<uint16_t*>(
+        heap_caps_malloc(
+            TX_BUFFER_PIXELS * sizeof(uint16_t),
+            MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL
+        )
+    );
+
+    if (!tx_buffer) {
+        Serial.println("Display DMA buffer allocation failed");
+        return;
+    }
+
+    spi_bus_config_t bus_config =
+        SH8601_PANEL_BUS_QSPI_CONFIG(
+            LCD_SCLK,
+            LCD_SDIO0,
+            LCD_SDIO1,
+            LCD_SDIO2,
+            LCD_SDIO3,
+            LCD_WIDTH * LCD_HEIGHT * 2
+        );
 
     esp_err_t err = spi_bus_initialize(
         LCD_HOST,
@@ -47,25 +142,34 @@ void display_hal_init(void) {
     );
 
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        Serial.printf("SPI init failed: %s\n", esp_err_to_name(err));
+        Serial.printf(
+            "SPI init failed: %s\n",
+            esp_err_to_name(err)
+        );
         return;
     }
 
     esp_lcd_panel_io_spi_config_t io_config =
         SH8601_PANEL_IO_QSPI_CONFIG(
             LCD_CS,
-            nullptr,
+            color_transfer_done_callback,
             nullptr
         );
 
+    // Wir warten auf jeden Transfer, daher genügt eine Transaktion.
+    io_config.trans_queue_depth = 1;
+
     err = esp_lcd_new_panel_io_spi(
-        (esp_lcd_spi_bus_handle_t)LCD_HOST,
+        static_cast<esp_lcd_spi_bus_handle_t>(LCD_HOST),
         &io_config,
         &panel_io
     );
 
     if (err != ESP_OK) {
-        Serial.printf("Panel IO init failed: %s\n", esp_err_to_name(err));
+        Serial.printf(
+            "Panel IO init failed: %s\n",
+            esp_err_to_name(err)
+        );
         return;
     }
 
@@ -88,7 +192,10 @@ void display_hal_init(void) {
     );
 
     if (err != ESP_OK) {
-        Serial.printf("SH8601 init failed: %s\n", esp_err_to_name(err));
+        Serial.printf(
+            "SH8601 init failed: %s\n",
+            esp_err_to_name(err)
+        );
         panel = nullptr;
         return;
     }
@@ -131,21 +238,32 @@ void display_hal_set_brightness(uint8_t level) {
 }
 
 void display_hal_fill_screen(uint16_t color) {
-    static uint16_t line[LCD_WIDTH];
-
-    for (int x = 0; x < LCD_WIDTH; x++) {
-        line[x] = color;
+    if (!panel || !tx_buffer) {
+        return;
     }
 
-    for (int y = 0; y < LCD_HEIGHT; y++) {
-        esp_lcd_panel_draw_bitmap(
-            panel,
-            20,
-            y,
-            20 + LCD_WIDTH,
-            y + 1,
-            line
-        );
+    const uint16_t swapped = swap_rgb565_bytes(color);
+
+    for (size_t i = 0; i < TX_BUFFER_PIXELS; i++) {
+        tx_buffer[i] = swapped;
+    }
+
+    for (int32_t y = 0; y < LCD_HEIGHT; y += TX_BUFFER_LINES) {
+        int32_t rows = LCD_HEIGHT - y;
+
+        if (rows > TX_BUFFER_LINES) {
+            rows = TX_BUFFER_LINES;
+        }
+
+        if (!send_buffer_blocking(
+                0,
+                y,
+                LCD_WIDTH,
+                rows,
+                tx_buffer
+            )) {
+            return;
+        }
     }
 }
 
@@ -156,18 +274,50 @@ void display_hal_draw_bitmap(
     int32_t h,
     const uint16_t* pixels
 ) {
-    if (!panel || !pixels || w <= 0 || h <= 0) {
+    if (!panel || !pixels || !tx_buffer || w <= 0 || h <= 0) {
         return;
     }
 
-    esp_lcd_panel_draw_bitmap(
-        panel,
-        x + 20,
-        y,
-        x + 20 + w,
-        y + h,
-        pixels
-    );
+    size_t rows_per_chunk = TX_BUFFER_PIXELS / static_cast<size_t>(w);
+
+    if (rows_per_chunk == 0) {
+        Serial.println("Display region is wider than TX buffer");
+        return;
+    }
+
+    int32_t row = 0;
+
+    while (row < h) {
+        int32_t rows = h - row;
+
+        if (static_cast<size_t>(rows) > rows_per_chunk) {
+            rows = static_cast<int32_t>(rows_per_chunk);
+        }
+
+        const size_t pixel_count =
+            static_cast<size_t>(w) * rows;
+
+        const uint16_t* source =
+            pixels + static_cast<size_t>(row) * w;
+
+        // LVGL liefert RGB565 im Speicher Little-Endian.
+        // Das Panel erwartet für jedes Pixel das höherwertige Byte zuerst.
+        for (size_t i = 0; i < pixel_count; i++) {
+            tx_buffer[i] = swap_rgb565_bytes(source[i]);
+        }
+
+        if (!send_buffer_blocking(
+                x,
+                y + row,
+                w,
+                rows,
+                tx_buffer
+            )) {
+            return;
+        }
+
+        row += rows;
+    }
 }
 
 void display_hal_tick(void) {

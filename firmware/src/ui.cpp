@@ -54,7 +54,26 @@ static void compute_layout(const BoardCaps& c) {
     L.margin = 20;
     L.title_y = 30;
 
-    if (c.height >= 460) {
+    if (c.width <= 300) {
+        // Narrow portrait layout — 280x456 AMOLED.
+        L.margin = 10;
+        L.title_y = 16;
+        L.content_y = 68;
+
+        L.usage_panel_h = 132;
+        L.usage_panel_gap = 10;
+        L.usage_bar_y = 50;
+        L.usage_reset_y = 82;
+
+        L.bt_info_panel_h = 132;
+        L.bt_reset_zone_h = 86;
+        L.bt_title_font    = &font_tiempos_34;
+        L.bt_status_font   = &font_styrene_28;
+        L.bt_device_font   = &font_styrene_16;
+        L.bt_credit_1_font = &font_styrene_16;
+        L.bt_credit_2_font = &font_styrene_14;
+    }
+    else if (c.height >= 460) {
         // Large layout — tuned for 480x480 (AMOLED-2.16).
         L.content_y = 100;
         L.usage_panel_h = 150;
@@ -124,6 +143,7 @@ static lv_image_dsc_t battery_dscs[5];  // empty, low, medium, full, charging
 // connected but no usage update landed within DATA_FRESH_MS, the pairing hint
 // when BLE is down. Re-evaluated every loop in ui_tick_anim().
 static lv_obj_t* idle_group;            // the "Zzz" idle screen
+static lv_obj_t* usage_creature;       // the sleeping creature on the idle screen (animated by splash_mini_tick)
 static uint32_t  last_data_ms = 0;      // lv_tick when the last valid usage update landed
 static bool      data_received = false; // any valid update since boot
 static int       view_state = -1;       // -1 unknown / 0 pair / 1 idle / 2 usage
@@ -348,8 +368,6 @@ static void build_idle_group(lv_obj_t* parent) {
     // A shrunk-down sleeping creature (reused claudepix "expression sleep" art)
     // sits between the header and the status line; the animated "Listening…"
     // status line carries the words, so no extra text is needed here.
-    lv_obj_t* creature = splash_mini_create(idle_group, "expression sleep", 160);
-    if (creature) lv_obj_align(creature, LV_ALIGN_CENTER, 0, -20);
 
     lv_obj_add_flag(idle_group, LV_OBJ_FLAG_HIDDEN);  // update_view_state decides
 }
@@ -366,9 +384,18 @@ static void init_usage_screen(lv_obj_t* scr) {
 
     lbl_title = lv_label_create(usage_container);
     lv_label_set_text(lbl_title, "Usage");
-    lv_obj_set_style_text_font(lbl_title, &font_tiempos_56, 0);
+    lv_obj_set_style_text_font(
+        lbl_title,
+        L.scr_w <= 300 ? &font_tiempos_34 : &font_tiempos_56,
+        0
+    );
     lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
-    lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 16, L.title_y);
+    lv_obj_align(
+        lbl_title,
+        LV_ALIGN_TOP_MID,
+        L.scr_w <= 300 ? 0 : 16,
+        L.title_y
+    );
 
     // Usage panels (shown when connected) live in a transparent full-size group
     // so they can be toggled against the pairing hint as one unit.
@@ -392,12 +419,32 @@ static void init_usage_screen(lv_obj_t* scr) {
     build_pair_group(usage_container);
     build_idle_group(usage_container);
 
+    // Kleine animierte Figur unterhalb der Usage-Karten.
+usage_creature = splash_mini_create(
+    usage_container,
+    "idle breathe",
+    60
+);
+
+if (usage_creature) {
+    lv_obj_align(
+        usage_creature,
+        LV_ALIGN_BOTTOM_MID,
+        0,
+        -48
+    );
+    lv_obj_add_flag(
+        usage_creature,
+        LV_OBJ_FLAG_EVENT_BUBBLE
+    );
+}
+
     // Status line — always visible on the usage view. Driven by ui_tick_anim().
     lbl_anim = lv_label_create(usage_container);
     lv_label_set_text(lbl_anim, "");
     lv_obj_set_style_text_font(lbl_anim, &font_mono_32, 0);
     lv_obj_set_style_text_color(lbl_anim, COL_ACCENT, 0);
-    lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -15);
+    lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -3);
 }
 
 // ======== Public API ========
@@ -472,14 +519,28 @@ static void update_view_state(void) {
     lv_obj_add_flag(pair_group, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(idle_group, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(usage_group, LV_OBJ_FLAG_HIDDEN);
+    if (usage_creature) {
+        lv_obj_add_flag(
+            usage_creature,
+            LV_OBJ_FLAG_HIDDEN
+        );
+    }
     lv_obj_clear_flag(v == 0 ? pair_group : v == 1 ? idle_group : usage_group,
                       LV_OBJ_FLAG_HIDDEN);
+    if (usage_creature && v == 2) {
+        lv_obj_clear_flag(
+            usage_creature,
+            LV_OBJ_FLAG_HIDDEN
+        );
+    }
 }
 
 void ui_tick_anim(void) {
     if (current_screen != SCREEN_USAGE) return;
     update_view_state();
-    if (view_state == 1) splash_mini_tick();   // animate the sleeping creature on the idle screen
+    if (view_state == 1 || view_state == 2) {
+        splash_mini_tick();
+    }
 
     uint32_t now = lv_tick_get();
 
@@ -516,8 +577,14 @@ void ui_tick_anim(void) {
 static screen_t prev_non_splash_screen = SCREEN_USAGE;
 static void apply_battery_visibility(void) {
     if (!battery_img) return;
-    if (current_screen == SCREEN_SPLASH) lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
-    else                                  lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+
+    if (current_screen == SCREEN_SPLASH ||
+        !board_caps().has_battery ||
+        L.scr_w <= 300) {
+        lv_obj_add_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_clear_flag(battery_img, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 static void global_click_cb(lv_event_t* e) {
@@ -537,8 +604,11 @@ void ui_show_screen(screen_t screen) {
     }
 
     if (logo_img) {
-        if (screen == SCREEN_SPLASH) lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
-        else                          lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
+        if (screen == SCREEN_SPLASH || L.scr_w <= 300) {
+            lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
+        }
     }
 
     if (screen != SCREEN_SPLASH) prev_non_splash_screen = screen;
