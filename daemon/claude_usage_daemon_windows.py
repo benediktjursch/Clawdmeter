@@ -23,7 +23,8 @@ import httpx
 from bleak import BleakClient, BleakScanner
 from bleak.exc import BleakError
 
-DEVICE_NAME = "Claude Controller"
+DEVICE_NAME = "Clawdmeter"
+DEVICE_ADDRESS = "44:1B:F6:85:50:31"
 SERVICE_UUID = "4c41555a-4465-7669-6365-000000000001"
 RX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000002"
 REQ_CHAR_UUID = "4c41555a-4465-7669-6365-000000000004"
@@ -157,12 +158,18 @@ async def poll_api(token: str) -> dict | None:
 
 
 async def scan_for_device():
-    """Scan for DEVICE_NAME and return the BLEDevice, or None."""
-    log(f"Scanning for '{DEVICE_NAME}' ({SCAN_TIMEOUT}s)...")
-    device = await BleakScanner.find_device_by_name(DEVICE_NAME, timeout=SCAN_TIMEOUT)
+    """Find the already paired Clawdmeter by its Bluetooth address."""
+    log(f"Looking for paired Clawdmeter at {DEVICE_ADDRESS}...")
+
+    device = await BleakScanner.find_device_by_address(
+        DEVICE_ADDRESS,
+        timeout=SCAN_TIMEOUT,
+    )
+
     if device:
         log(f"Found: {device.address}")
-    return device  # BLEDevice or None — NOT an address string
+
+    return device
 
 
 class Session:
