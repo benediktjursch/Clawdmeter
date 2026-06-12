@@ -274,15 +274,19 @@ static void init_icon_dsc_rgb565a8(lv_image_dsc_t* dsc, int w, int h, const uint
 static lv_obj_t* make_pill(lv_obj_t* parent, const char* text) {
     lv_obj_t* lbl = lv_label_create(parent);
     lv_label_set_text(lbl, text);
-    lv_obj_set_style_text_font(lbl, &font_styrene_28, 0);
+    lv_obj_set_style_text_font(
+        lbl,
+        L.scr_w <= 300 ? &font_styrene_20 : &font_styrene_28,
+        0
+    );
     lv_obj_set_style_text_color(lbl, COL_TEXT, 0);
     lv_obj_set_style_bg_color(lbl, COL_BAR_BG, 0);
     lv_obj_set_style_bg_opa(lbl, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(lbl, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_pad_left(lbl, 18, 0);
-    lv_obj_set_style_pad_right(lbl, 18, 0);
-    lv_obj_set_style_pad_top(lbl, 6, 0);
-    lv_obj_set_style_pad_bottom(lbl, 6, 0);
+    lv_obj_set_style_pad_left(lbl, L.scr_w <= 300 ? 10 : 18, 0);
+    lv_obj_set_style_pad_right(lbl, L.scr_w <= 300 ? 10 : 18, 0);
+    lv_obj_set_style_pad_top(lbl, L.scr_w <= 300 ? 4 : 6, 0);
+    lv_obj_set_style_pad_bottom(lbl, L.scr_w <= 300 ? 4 : 6, 0);
     return lbl;
 }
 
@@ -303,7 +307,11 @@ static void make_usage_panel(lv_obj_t* parent, int y, const char* pill_text,
 
     *out_pct = lv_label_create(panel);
     lv_label_set_text(*out_pct, "---%");
-    lv_obj_set_style_text_font(*out_pct, &font_styrene_48, 0);
+    lv_obj_set_style_text_font(
+        *out_pct,
+        L.scr_w <= 300 ? &font_styrene_28 : &font_styrene_48,
+        0
+    );
     lv_obj_set_style_text_color(*out_pct, COL_TEXT, 0);
     lv_obj_set_pos(*out_pct, 0, 0);
 

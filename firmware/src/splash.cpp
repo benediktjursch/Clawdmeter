@@ -14,6 +14,9 @@
 static int  cell      = 24;        // recomputed in splash_init()
 static int  canvas_w  = GRID * 24;
 static int  canvas_h  = GRID * 24;
+// Auf schmalen Hochformat-Displays das gesamte Display als Canvas verwenden
+// und den sichtbaren Inhalt der Animation darin zentrieren.
+static bool center_visible_sprite = false;
 
 // Background fallback when palette is missing
 #define COL_EMPTY    0x0000  // true black (matches THEME_BG)
@@ -73,20 +76,166 @@ static void resolve_group_lists(void) {
 
 static uint16_t *row_buf = NULL;   // scratch row, sized to canvas_w
 
-static void render_frame(const uint8_t *cells, const uint16_t *palette) {
-    if (!row_buf || !canvas_buf) return;
-    for (int gy = 0; gy < GRID; gy++) {
-        for (int gx = 0; gx < GRID; gx++) {
-            uint8_t code = cells[gy * GRID + gx];
-            uint16_t color = (palette && code < SPLASH_PALETTE_SIZE) ? palette[code] : COL_EMPTY;
-            uint16_t *p = &row_buf[gx * cell];
-            for (int i = 0; i < cell; i++) p[i] = color;
+static inline uint16_t get_splash_color(
+    uint8_t code,
+    const uint16_t* palette
+) {
+    if (palette && code < SPLASH_PALETTE_SIZE) {
+        return palette[code];
+    }
+
+    return COL_EMPTY;
+}
+
+static void render_frame(
+    const uint8_t* cells,
+    const uint16_t* palette
+) {
+    if (!canvas_buf || !cells) {
+        return;
+    }
+
+    // Normales Verhalten für die bestehenden quadratischen Displays.
+    if (!center_visible_sprite) {
+        if (!row_buf) {
+            return;
         }
-        for (int dy = 0; dy < cell; dy++) {
-            memcpy(&canvas_buf[(gy * cell + dy) * canvas_w], row_buf, canvas_w * 2);
+
+        for (int gy = 0; gy < GRID; gy++) {
+            for (int gx = 0; gx < GRID; gx++) {
+                const uint8_t code = cells[gy * GRID + gx];
+                const uint16_t color =
+                    get_splash_color(code, palette);
+
+                uint16_t* p = &row_buf[gx * cell];
+
+                for (int i = 0; i < cell; i++) {
+                    p[i] = color;
+                }
+            }
+
+            for (int dy = 0; dy < cell; dy++) {
+                memcpy(
+                    &canvas_buf[
+                        (gy * cell + dy) * canvas_w
+                    ],
+                    row_buf,
+                    canvas_w * sizeof(uint16_t)
+                );
+            }
+        }
+
+        if (canvas) {
+            lv_obj_invalidate(canvas);
+        }
+
+        return;
+    }
+
+    // Gesamtes Hochformat-Canvas zuerst schwarz löschen.
+    const size_t canvas_pixels =
+        static_cast<size_t>(canvas_w) * canvas_h;
+
+    for (size_t i = 0; i < canvas_pixels; i++) {
+        canvas_buf[i] = COL_EMPTY;
+    }
+
+    // Sichtbaren Bereich über ALLE Frames der aktuellen Animation suchen.
+    // Dadurch bleibt die Position während der Animation stabil.
+    int min_x = GRID;
+    int min_y = GRID;
+    int max_x = -1;
+    int max_y = -1;
+
+    if (cur_anim < SPLASH_ANIM_COUNT) {
+        const splash_anim_def_t& animation =
+            splash_anims[cur_anim];
+
+        for (uint16_t frame = 0;
+             frame < animation.frame_count;
+             frame++) {
+
+            const uint8_t* frame_cells =
+                animation.frames[frame];
+
+            if (!frame_cells) {
+                continue;
+            }
+
+            for (int gy = 0; gy < GRID; gy++) {
+                for (int gx = 0; gx < GRID; gx++) {
+                    const uint8_t code =
+                        frame_cells[gy * GRID + gx];
+
+                    const uint16_t color =
+                        get_splash_color(
+                            code,
+                            animation.palette
+                        );
+
+                    if (color == COL_EMPTY) {
+                        continue;
+                    }
+
+                    if (gx < min_x) min_x = gx;
+                    if (gx > max_x) max_x = gx;
+                    if (gy < min_y) min_y = gy;
+                    if (gy > max_y) max_y = gy;
+                }
+            }
         }
     }
-    if (canvas) lv_obj_invalidate(canvas);
+
+    // Leerer Frame.
+    if (max_x < min_x || max_y < min_y) {
+        if (canvas) {
+            lv_obj_invalidate(canvas);
+        }
+
+        return;
+    }
+
+    const int visible_cells_w = max_x - min_x + 1;
+    const int visible_cells_h = max_y - min_y + 1;
+
+    const int visible_px_w = visible_cells_w * cell;
+    const int visible_px_h = visible_cells_h * cell;
+
+    // Sichtbaren Teil exakt im kompletten Display zentrieren.
+    const int origin_x = (canvas_w - visible_px_w) / 2;
+    const int origin_y = (canvas_h - visible_px_h) / 2;
+
+    for (int gy = min_y; gy <= max_y; gy++) {
+        for (int gx = min_x; gx <= max_x; gx++) {
+            const uint8_t code =
+                cells[gy * GRID + gx];
+
+            const uint16_t color =
+                get_splash_color(code, palette);
+
+            const int pixel_x =
+                origin_x + (gx - min_x) * cell;
+
+            const int pixel_y =
+                origin_y + (gy - min_y) * cell;
+
+            for (int dy = 0; dy < cell; dy++) {
+                uint16_t* destination =
+                    &canvas_buf[
+                        (pixel_y + dy) * canvas_w +
+                        pixel_x
+                    ];
+
+                for (int dx = 0; dx < cell; dx++) {
+                    destination[dx] = color;
+                }
+            }
+        }
+    }
+
+    if (canvas) {
+        lv_obj_invalidate(canvas);
+    }
 }
 
 // ---- Mini creature: a small animated creature for embedding in other screens
@@ -177,8 +326,22 @@ void splash_init(lv_obj_t *parent) {
     if (cell > MAX_CELL_NO_PSRAM) cell = MAX_CELL_NO_PSRAM;
 #endif
 
-    canvas_w = GRID * cell;
-    canvas_h = GRID * cell;
+    #ifdef BOARD_HAS_PSRAM
+        // Das 280x456-Board hat genug PSRAM für ein echtes Vollbild-Canvas.
+        center_visible_sprite =
+            c.width <= 300 &&
+            c.height > c.width;
+    #else
+        center_visible_sprite = false;
+    #endif
+
+        if (center_visible_sprite) {
+            canvas_w = c.width;
+            canvas_h = c.height;
+        } else {
+            canvas_w = GRID * cell;
+            canvas_h = GRID * cell;
+        }
 
     canvas_buf = (uint16_t*)heap_caps_malloc(canvas_w * canvas_h * 2, canvas_caps);
     row_buf    = (uint16_t*)heap_caps_malloc(canvas_w * 2,             canvas_caps);

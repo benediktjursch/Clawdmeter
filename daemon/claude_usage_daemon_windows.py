@@ -375,7 +375,11 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
 
     log("Connected")
     session = Session(client)
-    await session.setup_refresh_subscription()
+
+    # Windows/WinRT kann beim optionalen Notification-Abo direkt nach einem
+    # Firmware-Neustart die komplette GATT-Verbindung abbrechen.
+    # Der normale 60-Sekunden-Poll funktioniert auch ohne dieses Abo.
+    await asyncio.sleep(1.0)
 
     last_poll = 0.0  # D-03: poll immediately on first connect
     used_successfully = False
